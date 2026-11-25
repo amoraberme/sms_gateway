@@ -20,6 +20,7 @@ const server = new PGLiteSocketServer({
   db,
   port,
   host,
+  maxConnections: 50,
 });
 
 await server.start();
