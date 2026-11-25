@@ -1,0 +1,9 @@
+{
+  "name": "pglite-ctl",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@electric-sql/pglite": "^0.6.0",
+    "@electric-sql/pglite-socket": "^0.3.0"
+  }
+}

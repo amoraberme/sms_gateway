@@ -1,0 +1,135 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sms_gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sms_gateway}
+      POSTGRES_DB: ${POSTGRES_DB:-sms_gateway}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sms_gateway} -d ${POSTGRES_DB:-sms_gateway}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  carrier-primary:
+    build:
+      context: ./mock_carrier
+    environment:
+      CARRIER_NAME: carrier-primary
+      GATEWAY_DLR_URL: http://gateway-api:8000/carrier/dlr
+      DLR_SECRET: ${DLR_SECRET:-dcc-shared-dlr-hmac-secret-2026}
+      MAX_RPS: 50
+      MIN_LATENCY_MS: 20
+      MAX_LATENCY_MS: 300
+      RATE_503: 0.03
+      RATE_400: 0.01
+      RATE_TIMEOUT: 0.01
+      TIMEOUT_MS: 5500
+      DLR_MIN_DELAY_SEC: 0.5
+      DLR_MAX_DELAY_SEC: 10.0
+      RATE_DUPLICATE_DLR: 0.10
+      RATE_EARLY_DLR: 0.05
+      CARRIER_DEDUP_MESSAGE_ID: ${CARRIER_DEDUP_MESSAGE_ID:-true}
+    ports:
+      - "8001:8001"
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  carrier-secondary:
+    build:
+      context: ./mock_carrier
+    environment:
+      CARRIER_NAME: carrier-secondary
+      GATEWAY_DLR_URL: http://gateway-api:8000/carrier/dlr
+      DLR_SECRET: ${DLR_SECRET:-dcc-shared-dlr-hmac-secret-2026}
+      MAX_RPS: 50
+      MIN_LATENCY_MS: 20
+      MAX_LATENCY_MS: 300
+      RATE_503: 0.03
+      RATE_400: 0.01
+      RATE_TIMEOUT: 0.01
+      TIMEOUT_MS: 5500
+      DLR_MIN_DELAY_SEC: 0.5
+      DLR_MAX_DELAY_SEC: 10.0
+      RATE_DUPLICATE_DLR: 0.10
+      RATE_EARLY_DLR: 0.05
+      CARRIER_DEDUP_MESSAGE_ID: ${CARRIER_DEDUP_MESSAGE_ID:-true}
+    ports:
+      - "8002:8002"
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
+
+  gateway-api:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sms_gateway}:${POSTGRES_PASSWORD:-sms_gateway}@postgres:5432/${POSTGRES_DB:-sms_gateway}
+      REDIS_URL: redis://redis:6379/0
+      DLR_SECRET: ${DLR_SECRET:-dcc-shared-dlr-hmac-secret-2026}
+      CARRIER_PRIMARY_URL: http://carrier-primary:8001
+      CARRIER_SECONDARY_URL: http://carrier-secondary:8002
+      GATEWAY_GLOBAL_RPS_LIMIT: ${GATEWAY_GLOBAL_RPS_LIMIT:-48}
+      RUN_EMBEDDED_WORKERS: "false"
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  gateway-worker:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gateway-api:
+        condition: service_started
+      carrier-primary:
+        condition: service_started
+      carrier-secondary:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sms_gateway}:${POSTGRES_PASSWORD:-sms_gateway}@postgres:5432/${POSTGRES_DB:-sms_gateway}
+      REDIS_URL: redis://redis:6379/0
+      DLR_SECRET: ${DLR_SECRET:-dcc-shared-dlr-hmac-secret-2026}
+      CARRIER_PRIMARY_URL: http://carrier-primary:8001
+      CARRIER_SECONDARY_URL: http://carrier-secondary:8002
+      GATEWAY_GLOBAL_RPS_LIMIT: ${GATEWAY_GLOBAL_RPS_LIMIT:-48}
+      DISPATCH_CONCURRENCY: ${DISPATCH_CONCURRENCY:-32}
+      MAX_SUBMIT_ATTEMPTS: ${MAX_SUBMIT_ATTEMPTS:-4}
+      RETRY_BASE_DELAY_SEC: ${RETRY_BASE_DELAY_SEC:-0.5}
+      CARRIER_TIMEOUT_SEC: ${CARRIER_TIMEOUT_SEC:-5.0}
+    command: ["python", "-m", "app.worker_main"]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_INTERNAL_URL: http://gateway-api:8000
+    depends_on:
+      - gateway-api
+    environment:
+      BACKEND_INTERNAL_URL: http://gateway-api:8000
+    ports:
+      - "3000:3000"
+
+volumes:
+  pg_data:
