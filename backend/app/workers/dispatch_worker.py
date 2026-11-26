@@ -33,7 +33,7 @@ async def process_one_message(
         row = await conn.fetchrow(
             """
             SELECT id, to_number, from_sender, body, encoding::text AS encoding,
-                   status_rank, attempt_count, next_attempt_at
+                   status_rank, attempt_count, next_attempt_at, carrier_used, last_error
             FROM messages
             WHERE id = $1
             """,
@@ -63,9 +63,18 @@ async def process_one_message(
         await scheduler.ack_inflight(msg_id_str)
         return
 
-    # On retry after transient error, prefer healthy secondary candidate if available
+    # On first ReadTimeout, retry the SAME carrier first so upstream message_id dedup
+    # returns the original carrier_id instead of duplicating onto a secondary carrier.
+    # For other transient errors (503/connect/repeat timeout), fail over to another candidate.
     attempt_idx = int(row["attempt_count"])
-    target = candidates[attempt_idx % len(candidates)] if len(candidates) > 1 and attempt_idx > 0 else candidates[0]
+    if attempt_idx > 0 and row["last_error"] == "CARRIER_READ_TIMEOUT" and row["carrier_used"]:
+        same_target = next((c for c in candidates if c.id == row["carrier_used"]), None)
+        target = same_target if same_target is not None else candidates[0]
+    elif attempt_idx > 0 and len(candidates) > 1 and row["carrier_used"]:
+        other = next((c for c in candidates if c.id != row["carrier_used"]), None)
+        target = other if other is not None else candidates[attempt_idx % len(candidates)]
+    else:
+        target = candidates[0]
 
     # Enforce global 50 RPS cap via distributed Redis Lua sliding window
     while True:
@@ -87,6 +96,18 @@ async def process_one_message(
             text=row["body"],
             encoding=row["encoding"],
         )
+    except httpx.ReadTimeout:
+        CARRIER_SUBMITS_TOTAL.labels(carrier=target.id, status_code="timeout").inc()
+        if row["last_error"] == "CARRIER_READ_TIMEOUT":
+            await router.record_failure(target.id)
+            err_code = "CARRIER_TIMEOUT_REPEAT"
+        else:
+            err_code = "CARRIER_READ_TIMEOUT"
+        await handle_pre_acceptance_failure(
+            pool, scheduler, msg_id, target.id, err_code, permanent=False
+        )
+        await scheduler.ack_inflight(msg_id_str)
+        return
     except httpx.TimeoutException:
         CARRIER_SUBMITS_TOTAL.labels(carrier=target.id, status_code="timeout").inc()
         await router.record_failure(target.id)

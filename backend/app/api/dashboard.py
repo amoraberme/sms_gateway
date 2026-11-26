@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.domain.state_machine import STATUS_RANKS
 from app.services.auth import AuthenticatedTenant
 from app.services.intake import accept_messages
 
@@ -109,8 +110,14 @@ async def list_all_messages(
         params.append(tenant_id)
         idx += 1
     if status_filter:
+        normalized_status = status_filter.strip().upper()
+        if normalized_status not in STATUS_RANKS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status filter '{status_filter}'. Allowed: {sorted(STATUS_RANKS.keys())}",
+            )
         conditions.append(f"m.status = ${idx}::message_status")
-        params.append(status_filter.upper())
+        params.append(normalized_status)
         idx += 1
     if client_ref:
         conditions.append(f"m.client_ref ILIKE ${idx}")

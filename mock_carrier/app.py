@@ -9,22 +9,26 @@ import json
 import os
 import random
 import time
+from typing import Literal
 import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 
 class SubmitRequest(BaseModel):
     message_id: str
     to: str
-    from_: str | None = None
+    from_: str = Field(alias="from")
     text: str
-    encoding: str
+    encoding: Literal["GSM7", "UCS2"]
 
     model_config = {"populate_by_name": True}
+
+
+SubmitRequest.model_rebuild()
 
 
 class CarrierConfig:
@@ -138,7 +142,11 @@ async def update_config(body: dict) -> dict:
 @app.post("/submit")
 async def submit_sms(request: Request) -> JSONResponse:
     payload = await request.json()
-    message_id = str(payload["message_id"])
+    try:
+        parsed = SubmitRequest.model_validate(payload)
+    except ValidationError as exc:
+        return JSONResponse(status_code=400, content={"error": "INVALID_SUBMIT_PAYLOAD", "detail": str(exc)})
+    message_id = parsed.message_id
 
     # Enforce strict global sliding-window RPS cap (>50/sec -> 429)
     now = time.monotonic()

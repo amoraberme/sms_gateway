@@ -258,6 +258,7 @@ async def accept_messages(
             if endpoint == "single":
                 m0 = prepared[0]
                 response_body: dict[str, Any] = {
+                    "id": str(m0.message_id),
                     "message_id": str(m0.message_id),
                     "status": "ACCEPTED",
                     "to": m0.to_number,
@@ -277,6 +278,7 @@ async def accept_messages(
                     "balance_remaining": str(new_balance),
                     "messages": [
                         {
+                            "id": str(m.message_id),
                             "message_id": str(m.message_id),
                             "status": "ACCEPTED",
                             "to": m.to_number,

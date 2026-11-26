@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS prices (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- 3. Carriers & Prefix Routing (Core + Bonus #1)
+-- 3. Carriers & Prefix Routing
 CREATE TABLE IF NOT EXISTS carriers (
     id                VARCHAR(64) PRIMARY KEY,
     name              VARCHAR(120) NOT NULL,

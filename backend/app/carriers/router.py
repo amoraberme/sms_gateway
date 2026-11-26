@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 import asyncpg
 import redis.asyncio as aioredis
 
@@ -20,11 +21,18 @@ class CarrierRouter:
 
     FAILURE_THRESHOLD = 3
     OPEN_TTL_SEC = 15
+    ROUTE_CACHE_TTL_SEC = 5.0
 
     def __init__(self, pool: asyncpg.Pool, redis_client: aioredis.Redis) -> None:
         self.pool = pool
         self.redis = redis_client
         self.settings = get_settings()
+        self._routes_cache: list[dict] | None = None
+        self._routes_cached_at: float = 0.0
+
+    def invalidate_cache(self) -> None:
+        self._routes_cache = None
+        self._routes_cached_at = 0.0
 
     def _effective_url(self, carrier_id: str, db_url: str) -> str:
         if carrier_id == "carrier-primary":
@@ -33,7 +41,10 @@ class CarrierRouter:
             return self.settings.carrier_secondary_url or db_url
         return db_url
 
-    async def select_candidates(self, to_number: str) -> list[CarrierTarget]:
+    async def _get_all_routes(self) -> list[dict]:
+        now = time.monotonic()
+        if self._routes_cache is not None and (now - self._routes_cached_at) < self.ROUTE_CACHE_TTL_SEC:
+            return self._routes_cache
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -41,11 +52,16 @@ class CarrierRouter:
                 FROM carrier_routes r
                 JOIN carriers c ON c.id = r.carrier_id
                 WHERE c.is_active = TRUE
-                  AND $1 LIKE (r.prefix || '%')
                 ORDER BY LENGTH(r.prefix) DESC, r.priority_order ASC
-                """,
-                to_number,
+                """
             )
+        self._routes_cache = [dict(r) for r in rows]
+        self._routes_cached_at = now
+        return self._routes_cache
+
+    async def select_candidates(self, to_number: str) -> list[CarrierTarget]:
+        all_routes = await self._get_all_routes()
+        rows = [r for r in all_routes if to_number.startswith(r["prefix"])]
 
         if not rows:
             return []

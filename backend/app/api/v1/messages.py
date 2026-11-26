@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.domain.state_machine import STATUS_RANKS
 from app.services.auth import AuthenticatedTenant, get_current_tenant
 from app.services.intake import accept_messages
 
@@ -96,6 +97,8 @@ async def list_messages(
     client_ref: str | None = Query(default=None),
     start_date: datetime | None = Query(default=None),
     end_date: datetime | None = Query(default=None),
+    from_date: datetime | None = Query(default=None),
+    to_date: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -105,20 +108,28 @@ async def list_messages(
     idx = 2
 
     if status_filter:
+        normalized_status = status_filter.strip().upper()
+        if normalized_status not in STATUS_RANKS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status filter '{status_filter}'. Allowed: {sorted(STATUS_RANKS.keys())}",
+            )
         conditions.append(f"status = ${idx}::message_status")
-        params.append(status_filter.upper())
+        params.append(normalized_status)
         idx += 1
     if client_ref:
         conditions.append(f"client_ref = ${idx}")
         params.append(client_ref)
         idx += 1
-    if start_date:
+    eff_start = start_date or from_date
+    eff_end = end_date or to_date
+    if eff_start:
         conditions.append(f"accepted_at >= ${idx}")
-        params.append(start_date)
+        params.append(eff_start)
         idx += 1
-    if end_date:
+    if eff_end:
         conditions.append(f"accepted_at <= ${idx}")
-        params.append(end_date)
+        params.append(eff_end)
         idx += 1
 
     where_sql = " AND ".join(conditions)
