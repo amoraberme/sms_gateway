@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from uuid import UUID
 import pytest
 
 from app.carriers.client import CarrierClient, CarrierSubmitResponse
@@ -12,7 +11,7 @@ from tests.conftest import ACME_KEY, sign_dlr
 
 
 class EarlyDlrCarrierClient(CarrierClient):
-    """Simulates the ~5% race where /carrier/dlr arrives BEFORE /submit returns."""
+    """Simulates the ~5% race where /carrier/dlr (even duplicated) arrives BEFORE /submit returns."""
 
     def __init__(self, asgi_client, carrier_id: str) -> None:
         self.asgi_client = asgi_client
@@ -25,21 +24,26 @@ class EarlyDlrCarrierClient(CarrierClient):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         raw, sig = sign_dlr(dlr_payload)
-        # Early DLR arrives while /submit is still in-flight!
-        r_dlr = await self.asgi_client.post(
+        # Early DLR arrives twice while /submit is still in-flight!
+        r_dlr1 = await self.asgi_client.post(
             "/carrier/dlr",
             content=raw,
             headers={"Content-Type": "application/json", "X-Signature": sig},
         )
-        assert r_dlr.status_code == 200
-        assert r_dlr.json()["status"] == "buffered_early_dlr"
+        r_dlr2 = await self.asgi_client.post(
+            "/carrier/dlr",
+            content=raw,
+            headers={"Content-Type": "application/json", "X-Signature": sig},
+        )
+        assert r_dlr1.status_code == 200 and r_dlr1.json()["status"] == "buffered_early_dlr"
+        assert r_dlr2.status_code == 200 and r_dlr2.json()["status"] == "duplicate_ignored"
 
         await asyncio.sleep(0.02)
         return CarrierSubmitResponse(status_code=200, carrier_id=self.carrier_id)
 
 
 @pytest.mark.asyncio
-async def test_out_of_order_and_duplicate_dlr(db_and_app):
+async def test_out_of_order_duplicate_and_conflicting_late_dlr(db_and_app):
     client, pool, scheduler = db_and_app
 
     send_resp = await client.post(
@@ -59,7 +63,7 @@ async def test_out_of_order_and_duplicate_dlr(db_and_app):
 
     await process_one_message(pool, scheduler, router, fake_carrier, msg_id)
 
-    # Duplicate DLR arrives after submission is already DELIVERED
+    # Duplicate DELIVRD DLR arrives after submission is already DELIVERED
     dup_payload = {
         "carrier_id": carrier_id,
         "status": "DELIVRD",
@@ -74,7 +78,21 @@ async def test_out_of_order_and_duplicate_dlr(db_and_app):
     assert r_dup.status_code == 200
     assert r_dup.json()["status"] == "duplicate_ignored"
 
-    # Verify final state is DELIVERED (not overwritten back to SUBMITTED) & events are clean
+    # Conflicting late EXPIRED DLR must NOT overwrite terminal DELIVERED
+    late_expired = {
+        "carrier_id": carrier_id,
+        "status": "EXPIRED",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    raw_e, sig_e = sign_dlr(late_expired)
+    r_exp = await client.post(
+        "/carrier/dlr",
+        content=raw_e,
+        headers={"Content-Type": "application/json", "X-Signature": sig_e},
+    )
+    assert r_exp.status_code == 200
+    assert r_exp.json()["status"] == "already_terminal_ignored"
+
     detail = await client.get(f"/v1/messages/{msg_id}", headers={"X-API-Key": ACME_KEY})
     assert detail.status_code == 200
     body = detail.json()

@@ -127,11 +127,11 @@ async def mark_submitted_and_correlate_early_dlr(
                     """
                     UPDATE dlr_receipts
                     SET message_id = $1, processed_at = $2
-                    WHERE id = $3
+                    WHERE carrier_id = $3 AND processed_at IS NULL
                     """,
                     message_id,
                     now,
-                    early_dlr["id"],
+                    carrier_id,
                 )
                 if msg["webhook_url"]:
                     wh_payload = {

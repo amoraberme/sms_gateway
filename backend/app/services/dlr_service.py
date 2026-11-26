@@ -44,6 +44,7 @@ async def process_carrier_dlr(
     updated_message_id: str | None = None
     updated_tenant_id: str | None = None
     submitted_at: datetime | None = None
+    already_terminal_status: str | None = None
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -88,11 +89,10 @@ async def process_carrier_dlr(
                 # Buffered safely in dlr_receipts with processed_at = NULL.
                 return {"status": "buffered_early_dlr"}
 
-            updated_message_id = str(msg["id"])
-            updated_tenant_id = str(msg["tenant_id"])
-            submitted_at = msg["submitted_at"]
-
             if msg["status_rank"] < 40:
+                updated_message_id = str(msg["id"])
+                updated_tenant_id = str(msg["tenant_id"])
+                submitted_at = msg["submitted_at"]
                 await conn.execute(
                     """
                     UPDATE messages
@@ -139,6 +139,9 @@ async def process_carrier_dlr(
                         json.dumps(wh_payload),
                     )
 
+            else:
+                already_terminal_status = msg["status"]
+
             await conn.execute(
                 """
                 UPDATE dlr_receipts
@@ -149,6 +152,9 @@ async def process_carrier_dlr(
                 now,
                 receipt_id,
             )
+
+    if already_terminal_status is not None:
+        return {"status": "already_terminal_ignored", "current_status": already_terminal_status}
 
     if submitted_at is not None:
         delay = max(0.0, (now - submitted_at).total_seconds())

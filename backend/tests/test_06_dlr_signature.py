@@ -8,7 +8,7 @@ from tests.conftest import sign_dlr
 
 
 @pytest.mark.asyncio
-async def test_dlr_missing_or_wrong_signature_returns_401(db_and_app):
+async def test_dlr_missing_wrong_or_whitespace_tampered_signature_returns_401(db_and_app):
     client, pool, _ = db_and_app
     payload = {
         "carrier_id": "c-unauth-001",
@@ -29,12 +29,12 @@ async def test_dlr_missing_or_wrong_signature_returns_401(db_and_app):
     )
     assert r2.status_code == 401
 
-    # Tampered body with original signature
+    # Semantically identical JSON with whitespace mutation against compact-JSON signature -> 401
     _, valid_sig = sign_dlr(payload)
-    tampered_raw = json.dumps({**payload, "status": "UNDELIV"}).encode("utf-8")
+    spaced_raw = json.dumps(payload, indent=2).encode("utf-8")
     r3 = await client.post(
         "/carrier/dlr",
-        content=tampered_raw,
+        content=spaced_raw,
         headers={"Content-Type": "application/json", "X-Signature": valid_sig},
     )
     assert r3.status_code == 401
